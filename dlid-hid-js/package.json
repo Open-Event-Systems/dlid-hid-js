@@ -1,0 +1,35 @@
+{
+  "name": "dlid-hid-js",
+  "version": "0.1.0",
+  "description": "",
+  "type": "module",
+  "exports": {
+    ".": "./dist/src/index.js"
+  },
+  "files": [
+    "dist/src/**",
+    "!**/*.stories.*",
+    "!**/*.test.*"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest",
+    "storybook": "storybook dev -p 6006",
+    "build-storybook": "storybook build"
+  },
+  "keywords": [],
+  "author": "",
+  "packageManager": "pnpm@10.9.0",
+  "devDependencies": {
+    "@storybook/addon-docs": "^9.1.15",
+    "@storybook/react-vite": "^9.1.15",
+    "@types/react": "^19.2.2",
+    "react": "^19.2.0",
+    "storybook": "^9.1.15",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.4"
+  },
+  "peerDependencies": {
+    "react": "^19.2.0"
+  }
+}
