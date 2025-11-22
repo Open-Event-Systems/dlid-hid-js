@@ -3,7 +3,6 @@ import {
   useState,
   useSyncExternalStore,
   type ChangeEvent,
-  type Key,
   type KeyboardEvent,
 } from "react"
 import {
@@ -32,7 +31,6 @@ export type DLIDInputCallbacks = Readonly<{
 }>
 
 const NUMS = "0123456789"
-const inputPattern = /^@[^a-zA-Z0-9. -]{3}ANSI /
 
 class InputState {
   private state: DLIDInputStateValue
@@ -139,7 +137,7 @@ class InputState {
   private append(data: string) {
     if (this.parser) {
       this.parser.append(data)
-      if (this.parser.done && this.parser.header) {
+      if (this.parser.done) {
         // update state/result when done
         this.state = {
           ...this.state,
@@ -171,7 +169,7 @@ class InputState {
       } else if (
         !this.state.isInputtingDLID &&
         this.parser.data &&
-        inputPattern.test(this.parser.data)
+        this.parser.data.length >= 9
       ) {
         // set dlid input state if it looks like a valid dlid string
         this.state = {

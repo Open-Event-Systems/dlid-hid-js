@@ -1,4 +1,4 @@
-export type Header = Readonly<{
+export type Header = {
   dataElementSeparator: string
   recordSeparator: string
   segmentTerminator: string
@@ -6,7 +6,7 @@ export type Header = Readonly<{
   aamvaVersion: string
   jurisdictionVersion: string
   numEntries: number
-}>
+}
 
 export type SubfileDesignator = Readonly<{
   type: string
@@ -21,25 +21,24 @@ export type Subfiles = Readonly<Record<string, SubfileData | undefined>>
 export type Parser = Readonly<{
   data: string
   error: Error | undefined
-  header: Readonly<Header> | undefined
+  header: Readonly<Header>
   subfileDesignators: readonly Readonly<SubfileDesignator>[]
   subfiles: Subfiles
   done: boolean
   append(data: string): boolean
 }>
 
-const HEADER_SIZE = 21
 const SUBFILE_DESIGNATOR_SIZE = 10
 
-class ParseError extends Error {}
+class ParseError extends Error { }
 
-class EOF extends ParseError {}
+class EOF extends ParseError { }
 
 class StringReader {
   constructor(
     public data: string,
     public pos = 0,
-  ) {}
+  ) { }
 
   get avail(): number {
     return this.data.length - this.pos
@@ -63,46 +62,43 @@ class StringReader {
   }
 }
 
-const badHeaderPattern = /[a-zA-Z0-9]/
+const invalidSeparatorPattern = /[a-zA-Z0-9 ]/
 
-const parseHeader = (reader: StringReader): Header => {
-  // quickly check the first two chars to fail immediately
-  const check = reader.peek(2)
-  if (check.charAt(0) != "@" || badHeaderPattern.test(check.charAt(1))) {
-    throw new ParseError()
+
+const makeHeaderParsers = (reader: StringReader, header: Header): (() => void)[] => {
+  const readSeparator = (): string => {
+    const s = reader.read(1)
+    if (invalidSeparatorPattern.test(s)) {
+      throw new ParseError()
+    }
+    return s
   }
 
-  const copied = new StringReader(reader.peek(HEADER_SIZE))
-  copied.read(1)
-
-  const dataElementSeparator = copied.read(1)
-  const recordSeparator = copied.read(1)
-  const segmentTerminator = copied.read(1)
-
-  const ansi = copied.read(5)
-  if (ansi != "ANSI ") {
-    throw new ParseError()
-  }
-
-  const iin = copied.read(6)
-  const aamvaVersion = copied.read(2)
-  const jurisdictionVersion = copied.read(2)
-  const numEntries = parseInt(copied.read(2))
-  if (isNaN(numEntries)) {
-    throw new ParseError()
-  }
-
-  reader.read(HEADER_SIZE)
-
-  return {
-    dataElementSeparator,
-    recordSeparator,
-    segmentTerminator,
-    iin,
-    aamvaVersion,
-    jurisdictionVersion,
-    numEntries,
-  }
+  return [
+    () => {
+      if (reader.read(1) != "@") {
+        throw new ParseError()
+      }
+    },
+    () => header.dataElementSeparator = readSeparator(),
+    () => header.recordSeparator = readSeparator(),
+    () => header.segmentTerminator = readSeparator(),
+    () => {
+      if (reader.read(5) != "ANSI ") {
+        throw new ParseError()
+      }
+    },
+    () => header.iin = reader.read(6),
+    () => header.aamvaVersion = reader.read(2),
+    () => header.jurisdictionVersion = reader.read(2),
+    () => {
+      const num = parseInt(reader.read(2))
+      if (isNaN(num)) {
+        throw new ParseError()
+      }
+      header.numEntries = num
+    },
+  ]
 }
 
 const parseSubfileDesignator = (reader: StringReader): SubfileDesignator => {
@@ -185,14 +181,46 @@ class _Parser {
   private reader: StringReader
   public error: Error | undefined = undefined
 
-  public header: Header | undefined = undefined
+  public header: Header = {
+    iin: "",
+    dataElementSeparator: "",
+    recordSeparator: "",
+    segmentTerminator: "",
+    aamvaVersion: "",
+    jurisdictionVersion: "",
+    numEntries: 0,
+  }
+
   public subfileDesignators: SubfileDesignator[] = []
   public subfiles: Record<string, SubfileData> = {}
-  private nSubfiles = 0
   public done = false
+
+  private steps: (() => void)[]
 
   constructor(initialData: string) {
     this.reader = new StringReader(initialData)
+    this.steps = [
+      ...makeHeaderParsers(this.reader, this.header),
+      () => {
+        for (let i = 0; i < this.header.numEntries; i++) {
+          this.steps.push(() => {
+            const sd = parseSubfileDesignator(this.reader)
+            this.subfileDesignators.push(sd)
+
+            this.steps.push(() => {
+              if (sd.type == "DL" || sd.type == "ID") {
+                const parsed = parseSubfile(this.header, sd, this.reader)
+                this.subfiles[sd.type] = parsed
+              } else {
+                const sdReader = new StringReader(this.reader.data, sd.offset)
+                sdReader.peek(sd.length)
+                this.subfiles[sd.type] = {}
+              }
+            })
+          })
+        }
+      },
+    ]
   }
 
   get data(): string {
@@ -208,33 +236,13 @@ class _Parser {
     return this.updateParse()
   }
 
-  private updateParseOnce(): boolean {
-    if (!this.header) {
-      this.header = parseHeader(this.reader)
-      return true
-    } else if (this.subfileDesignators.length < this.header.numEntries) {
-      const sd = parseSubfileDesignator(this.reader)
-      this.subfileDesignators.push(sd)
-      return true
-    } else if (this.nSubfiles < this.subfileDesignators.length) {
-      for (const sd of this.subfileDesignators) {
-        if (!(sd.type in this.subfiles)) {
-          if (sd.type == "DL" || sd.type == "ID") {
-            this.subfiles[sd.type] = parseSubfile(this.header, sd, this.reader)
-          } else {
-            // skip
-            const sdReader = new StringReader(this.reader.data, sd.offset)
-            sdReader.peek(sd.length)
-            this.subfiles[sd.type] = {}
-          }
-
-          this.nSubfiles++
-        }
-      }
-      return true
+  private updateParseOnce() {
+    const step = this.steps[0]
+    if (step) {
+      step()
+      this.steps.splice(0, 1)
     } else {
       this.done = true
-      return false
     }
   }
 
@@ -244,11 +252,10 @@ class _Parser {
     }
 
     try {
-      let cont = true
-      while (cont) {
-        cont = this.updateParseOnce()
+      while (!this.done && !this.error) {
+        this.updateParseOnce()
       }
-      return cont
+      return false
     } catch (e) {
       if (e instanceof EOF) {
         return true
@@ -260,6 +267,9 @@ class _Parser {
   }
 }
 
+/**
+ * Return a {@link Parser}.
+ */
 export const makeDLIDParser = (initialData?: string): Parser => {
   return new _Parser(initialData ?? "")
 }
