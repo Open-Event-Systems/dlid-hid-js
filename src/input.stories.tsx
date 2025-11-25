@@ -1,17 +1,39 @@
-import { type HTMLAttributes } from "react"
+import { useEffect, type HTMLAttributes } from "react"
 import type { Meta, StoryObj } from "@storybook/react-vite"
 import { useDLIDInput } from "./input.js"
+import { useSpecialCharInput } from "./special-char.js"
 
 const Component = (props: HTMLAttributes<HTMLInputElement>) => {
   const { ...other } = props
 
-  const [state, callbacks] = useDLIDInput()
+  const { state, setValue, append } = useDLIDInput()
+
+  const inputProps = useSpecialCharInput(append)
+
+  useEffect(() => {
+    if (state.result) {
+      const dlidSf =
+        state.result.subfiles.get("DL") ?? state.result.subfiles.get("ID")
+      if (dlidSf) {
+        const firstName = dlidSf.get("DAC")
+        const lastName = dlidSf.get("DCS")
+        setValue(`${firstName} ${lastName}`)
+      }
+    }
+  }, [state.result, setValue])
 
   return (
     <>
       <div>
-        <input {...other} value={state.value} {...callbacks} />
-        {state.isInputtingDLID ? "!" : undefined}
+        <input
+          autoFocus
+          {...other}
+          value={state.value}
+          onKeyDown={state.isCapturing ? inputProps.onKeyDown : undefined}
+          onKeyUp={state.isCapturing ? inputProps.onKeyUp : undefined}
+          onChange={(e) => setValue(e.target.value)}
+        />
+        {state.isCapturing ? (state.isParsingDLID ? "!!!" : "...") : undefined}
       </div>
       <textarea
         disabled

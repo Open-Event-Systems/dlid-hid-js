@@ -1,268 +1,169 @@
+import { useState, useSyncExternalStore } from "react"
 import {
-  useMemo,
-  useState,
-  useSyncExternalStore,
-  type ChangeEvent,
-  type KeyboardEvent,
-} from "react"
-import {
+  HeaderParseError,
   makeDLIDParser,
-  type Header,
+  ParseError,
   type Parser,
-  type SubfileDesignator,
-  type Subfiles,
+  type ParseResult,
 } from "./parse.js"
+import { EOF, StringIO } from "./stringio.js"
 
-export type DLIDInputStateValue = Readonly<{
+export type InputState = Readonly<{
   value: string
-  isCapturingInput: boolean
-  isInputtingDLID: boolean
-  result?: Readonly<{
-    header: Header
-    subfileDesignators: readonly SubfileDesignator[]
-    subfiles: Readonly<Subfiles>
-  }>
+  isCapturing: boolean
+  isParsingDLID: boolean
+  result?: ParseResult | undefined
 }>
 
-export type DLIDInputCallbacks = Readonly<{
-  onChange: (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => void
-  onKeyDown: (e: KeyboardEvent) => void
-  onKeyUp: (e: KeyboardEvent) => void
-}>
+const TIMEOUT = 200
 
-const NUMS = "0123456789"
-
-class InputState {
-  private state: DLIDInputStateValue
-  private parser: Parser | undefined = undefined
-  private altBuffer = ""
+class _Input {
+  private parser: Parser
+  private reader: StringIO
+  private state: InputState
+  private timeout: number | undefined = undefined
 
   private observers: (() => void)[] = []
 
-  private timeout: number | undefined = undefined
-
-  constructor(
-    value?: string,
-    private setValue?: (value: string) => void,
-  ) {
+  constructor(initialData?: string) {
+    this.reader = new StringIO("")
+    this.parser = makeDLIDParser(this.reader)
     this.state = {
-      value: value ?? "",
-      isCapturingInput: false,
-      isInputtingDLID: false,
+      isCapturing: false,
+      isParsingDLID: false,
+      value: initialData || "",
     }
   }
 
-  onChange = (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-    const value = e.target.value
-    if (this.state.isCapturingInput && this.parser) {
-      if (value.startsWith(this.state.value)) {
-        const appended = value.substring(this.state.value.length)
-        this.append(appended)
-      }
-      this.resetTimeout()
-    } else {
-      let isCapturingInput = this.state.isCapturingInput
-      const value = e.target.value
-
-      if (value.length > 0 && value.charAt(value.length - 1) == "@") {
-        this.parser = makeDLIDParser("@")
-        isCapturingInput = true
-      }
-
-      this.state = {
-        ...this.state,
-        isCapturingInput,
-        value,
-      }
-
-      this.setValue && this.setValue(value)
-      this.resetTimeout()
-      this.notify()
-    }
-  }
-
-  onKeyDown = (e: KeyboardEvent) => {
-    if (this.state.isCapturingInput) {
-      this.resetTimeout()
-
-      if (e.key == "Alt") {
-        e.preventDefault()
-        return
-      }
-
-      const alt = e.getModifierState("Alt")
-      if (alt && NUMS.includes(e.key)) {
-        this.altBuffer += e.key
-        e.preventDefault()
-        return
-      } else if (!alt && this.altBuffer.length > 0) {
-        this.finishAlt()
-      }
-
-      const specialChar = getSpecialChar(e)
-      if (specialChar != null) {
-        e.preventDefault()
-        this.append(specialChar)
-      }
-    }
-  }
-
-  onKeyUp = (e: KeyboardEvent) => {
-    if (
-      this.state.isCapturingInput &&
-      e.key == "Alt" &&
-      this.altBuffer.length > 0
-    ) {
-      e.preventDefault()
-      this.finishAlt()
-    }
-  }
-
-  getSnapshot = (): DLIDInputStateValue => {
-    return this.state
-  }
-
-  subscribe = (callback: () => void): (() => void) => {
-    this.observers.push(callback)
-    const unsubscribe = () => {
-      const idx = this.observers.indexOf(callback)
-      if (idx != -1) {
-        this.observers.splice(idx, 1)
-      }
-    }
-
-    return unsubscribe
-  }
-
-  private append(data: string) {
-    if (this.parser) {
-      this.parser.append(data)
-      if (this.parser.done) {
-        // update state/result when done
-        this.state = {
-          ...this.state,
-          value: "",
-          isCapturingInput: false,
-          isInputtingDLID: false,
-          result: {
-            header: this.parser.header,
-            subfileDesignators: this.parser.subfileDesignators,
-            subfiles: this.parser.subfiles,
-          },
-        }
-        this.parser = undefined
-        this.setValue && this.setValue("")
-        this.notify()
-      } else if (!this.state.isInputtingDLID && this.parser.error != null) {
-        // update state/result immediately if we bail out early
-        const value = this.parser.data
-        this.state = {
-          ...this.state,
-          value: value,
-          isInputtingDLID: false,
-          isCapturingInput: false,
-        }
-        this.parser = undefined
-        this.setValue && this.setValue(value)
-        this.notify()
-        this.resetTimeout()
-      } else if (
-        !this.state.isInputtingDLID &&
-        this.parser.data &&
-        this.parser.data.length >= 9
-      ) {
-        // set dlid input state if it looks like a valid dlid string
-        this.state = {
-          ...this.state,
-          isInputtingDLID: true,
-        }
-        this.notify()
-      }
-    }
-  }
-
-  private finishAlt() {
-    const num = parseInt(this.altBuffer, 10)
-    this.altBuffer = ""
-
-    if (!isNaN(num)) {
-      this.append(String.fromCharCode(num))
-    }
-  }
-
-  private notify() {
+  private update(action: Partial<InputState>) {
+    this.state = { ...this.state, ...action }
     this.observers.forEach((cb) => cb())
+  }
+
+  private startCapturing() {
+    this.reader.append("@")
+    this.resetTimeout()
+    this.update({ isCapturing: true })
+  }
+
+  private cancelCapturing() {
+    if (this.timeout != null) {
+      window.clearTimeout(this.timeout)
+    }
+    this.timeout = undefined
+
+    if (this.state.isCapturing) {
+      const newVal = this.state.value + this.reader.data.substring(1)
+      this.reader = new StringIO("")
+      this.parser = makeDLIDParser(this.reader)
+      this.update({
+        value: newVal,
+        isCapturing: false,
+        isParsingDLID: false,
+        result: undefined,
+      })
+    }
+  }
+
+  private completeCapturing(result: ParseResult) {
+    if (this.timeout != null) {
+      window.clearTimeout(this.timeout)
+    }
+    this.timeout = undefined
+
+    this.reader = new StringIO("")
+    this.parser = makeDLIDParser(this.reader)
+    this.update({ isCapturing: false, isParsingDLID: false, result })
   }
 
   private resetTimeout() {
     if (this.timeout != null) {
       window.clearTimeout(this.timeout)
     }
-    if (this.state.isCapturingInput) {
-      this.timeout = window.setTimeout(this.onTimeout, 150)
-    }
+    this.timeout = window.setTimeout(this.handleTimeout, TIMEOUT)
   }
 
-  private onTimeout = () => {
-    if (this.state.isCapturingInput) {
-      let value = this.state.value
-      let result: DLIDInputStateValue["result"]
+  private handleTimeout = () => {
+    this.timeout = undefined
+    this.cancelCapturing()
+  }
 
-      if (this.parser) {
-        if (this.parser.done && this.parser.header) {
-          value = ""
-          result = {
-            header: this.parser.header,
-            subfileDesignators: this.parser.subfileDesignators,
-            subfiles: this.parser.subfiles,
+  append = (value: string) => {
+    if (this.state.isCapturing) {
+      this.reader.append(value)
+      try {
+        const res = this.parser.parse()
+        this.completeCapturing(res)
+      } catch (e) {
+        if (e instanceof EOF) {
+          // continue reading
+          this.resetTimeout()
+
+          if (this.reader.data.length >= 4 && !this.state.isParsingDLID) {
+            this.update({ isParsingDLID: true })
           }
+        } else if (e instanceof HeaderParseError) {
+          // failed parsing part of DLID header, bail out
+          this.cancelCapturing()
+        } else if (e instanceof ParseError) {
+          // ignore
+          this.resetTimeout()
         } else {
-          value = value + this.parser.data.substring(1)
+          throw e
         }
       }
+    } else {
+      const newVal = this.state.value + value
+      this.update({ value: newVal })
 
-      this.parser = undefined
-
-      this.state = {
-        ...this.state,
-        value,
-        isCapturingInput: false,
-        isInputtingDLID: false,
-        ...(result ? { result: result } : undefined),
+      if (newVal.length > 0 && newVal.charAt(newVal.length - 1) == "@") {
+        // start parsing
+        this.startCapturing()
       }
-
-      this.setValue && this.setValue(value)
-      this.notify()
     }
+  }
+
+  setValue = (v: string) => {
+    if (v.startsWith(this.state.value)) {
+      const added = v.substring(this.state.value.length)
+      this.append(added)
+    } else {
+      this.update({ value: "" })
+      this.append(v)
+    }
+  }
+
+  getSnapshot = (): InputState => {
+    return this.state
+  }
+
+  subscribe = (cb: () => void): (() => void) => {
+    const unsub = () => {
+      const idx = this.observers.indexOf(cb)
+      if (idx != -1) {
+        this.observers.splice(idx, 1)
+      }
+    }
+
+    this.observers.push(cb)
+
+    return unsub
   }
 }
 
-const getSpecialChar = (e: KeyboardEvent): string | undefined => {
-  const ctrl = e.getModifierState("Control")
+export type UseDLIDInputHook = Readonly<{
+  state: InputState
+  setValue: (v: string) => void
+  append: (v: string) => void
+}>
 
-  if (e.key == "j" && ctrl) {
-    return "\n"
-  } else if ((e.key == "6" || e.key == "^") && ctrl) {
-    return "\x1e"
-  } else if (e.key == "Enter") {
-    return "\r"
+export const useDLIDInput = (initialValue?: string): UseDLIDInputHook => {
+  const [input] = useState(() => new _Input(initialValue))
+  const state = useSyncExternalStore(input.subscribe, input.getSnapshot)
+
+  return {
+    state,
+    setValue: input.setValue,
+    append: input.append,
   }
-}
-
-export const useDLIDInput = (
-  initialValue?: string,
-  setValue?: (value: string) => void,
-): [DLIDInputStateValue, DLIDInputCallbacks] => {
-  const [state] = useState(() => new InputState(initialValue, setValue))
-  const stateVal = useSyncExternalStore(state.subscribe, state.getSnapshot)
-
-  const callbacks = useMemo<DLIDInputCallbacks>(() => {
-    return {
-      onChange: state.onChange,
-      onKeyDown: state.onKeyDown,
-      onKeyUp: state.onKeyUp,
-    }
-  }, [state])
-
-  return [stateVal, callbacks]
 }
